@@ -10,7 +10,7 @@ import textTable from 'text-table';
 import * as jsonc from 'jsonc-parser';
 
 import { createDockerParams, createLog, launch, ProvisionOptions } from './devContainers';
-import { SubstitutedConfig, createContainerProperties, envListToObj, inspectDockerImage, isDockerFileConfig, SubstituteConfig, addSubstitution, findContainerAndIdLabels, getCacheFolder } from './utils';
+import { SubstitutedConfig, createContainerProperties, envListToObj, inspectDockerImage, isDockerFileConfig, SubstituteConfig, addSubstitution, findContainerAndIdLabels, getCacheFolder, runAsyncHandler } from './utils';
 import { URI } from 'vscode-uri';
 import { ContainerError } from '../spec-common/errors';
 import { Log, LogDimensions, LogLevel, makeLog, mapLogLevel } from '../spec-utils/log';
@@ -44,6 +44,7 @@ import { readFeaturesConfig } from './featureUtils';
 import { featuresGenerateDocsHandler, featuresGenerateDocsOptions } from './featuresCLI/generateDocs';
 import { templatesGenerateDocsHandler, templatesGenerateDocsOptions } from './templatesCLI/generateDocs';
 import { mapNodeOSToGOOS, mapNodeArchitectureToGOARCH } from '../spec-configuration/containerCollectionsOCI';
+import { templateMetadataHandler, templateMetadataOptions } from './templatesCLI/metadata';
 
 const defaultDefaultUserEnvProbe: UserEnvProbe = 'loginInteractiveShell';
 
@@ -85,6 +86,7 @@ const mountRegex = /^type=(bind|volume),source=([^,]+),target=([^,]+)(?:,externa
 	y.command('templates', 'Templates commands', (y: Argv) => {
 		y.command('apply', 'Apply a template to the project', templateApplyOptions, templateApplyHandler);
 		y.command('publish <target>', 'Package and publish templates', templatesPublishOptions, templatesPublishHandler);
+		y.command('metadata <templateId>', 'Fetch a published Template\'s metadata', templateMetadataOptions, templateMetadataHandler);
 		y.command('generate-docs', 'Generate documentation', templatesGenerateDocsOptions, templatesGenerateDocsHandler);
 	});
 	y.command(restArgs ? ['exec', '*'] : ['exec <cmd> [args..]'], 'Execute a command on a running dev container', execOptions, execHandler);
@@ -103,6 +105,7 @@ function provisionOptions(y: Argv) {
 		'container-system-data-folder': { type: 'string', description: 'Container system data folder where system data inside the container will be stored.' },
 		'workspace-folder': { type: 'string', description: 'Workspace folder path. The devcontainer.json will be looked up relative to this path.' },
 		'workspace-mount-consistency': { choices: ['consistent' as 'consistent', 'cached' as 'cached', 'delegated' as 'delegated'], default: 'cached' as 'cached', description: 'Workspace mount consistency.' },
+		'gpu-availability': { choices: ['all' as 'all', 'detect' as 'detect', 'none' as 'none'], default: 'detect' as 'detect', description: 'Availability of GPUs in case the dev container requires any. `all` expects a GPU to be available.' },
 		'mount-workspace-git-root': { type: 'boolean', default: true, description: 'Mount the workspace using its Git root.' },
 		'id-label': { type: 'string', description: 'Id label(s) of the format name=value. These will be set on the container and used to query for an existing container. If no --id-label is given, one will be inferred from the --workspace-folder path.' },
 		'config': { type: 'string', description: 'devcontainer.json path. The default is to use .devcontainer/devcontainer.json or, if that does not exist, .devcontainer.json in the workspace folder.' },
@@ -123,6 +126,7 @@ function provisionOptions(y: Argv) {
 		'mount': { type: 'string', description: 'Additional mount point(s). Format: type=<bind|volume>,source=<source>,target=<target>[,external=<true|false>]' },
 		'remote-env': { type: 'string', description: 'Remote environment variables of the format name=value. These will be added when executing the user commands.' },
 		'cache-from': { type: 'string', description: 'Additional image to use as potential layer cache during image building' },
+		'cache-to': { type: 'string', description: 'Additional image to use as potential layer cache during image building' },
 		'buildkit': { choices: ['auto' as 'auto', 'never' as 'never'], default: 'auto' as 'auto', description: 'Control whether BuildKit should be used' },
 		'additional-features': { type: 'string', description: 'Additional features to apply to the dev container (JSON as per "features" section in devcontainer.json)' },
 		'skip-feature-auto-mapping': { type: 'boolean', default: false, hidden: true, description: 'Temporary option for testing.' },
@@ -136,6 +140,8 @@ function provisionOptions(y: Argv) {
 		'experimental-lockfile': { type: 'boolean', default: false, hidden: true, description: 'Write lockfile' },
 		'experimental-frozen-lockfile': { type: 'boolean', default: false, hidden: true, description: 'Ensure lockfile remains unchanged' },
 		'omit-syntax-directive': { type: 'boolean', default: false, hidden: true, description: 'Omit Dockerfile syntax directives' },
+		'include-configuration': { type: 'boolean', default: false, description: 'Include configuration in result.' },
+		'include-merged-configuration': { type: 'boolean', default: false, description: 'Include merged configuration in result.' },
 	})
 		.check(argv => {
 			const idLabels = (argv['id-label'] && (Array.isArray(argv['id-label']) ? argv['id-label'] : [argv['id-label']])) as string[] | undefined;
@@ -163,7 +169,7 @@ function provisionOptions(y: Argv) {
 type ProvisionArgs = UnpackArgv<ReturnType<typeof provisionOptions>>;
 
 function provisionHandler(args: ProvisionArgs) {
-	(async () => provision(args))().catch(console.error);
+	runAsyncHandler(provision.bind(null, args));
 }
 
 async function provision({
@@ -174,6 +180,7 @@ async function provision({
 	'container-system-data-folder': containerSystemDataFolder,
 	'workspace-folder': workspaceFolderArg,
 	'workspace-mount-consistency': workspaceMountConsistency,
+	'gpu-availability': gpuAvailability,
 	'mount-workspace-git-root': mountWorkspaceGitRoot,
 	'id-label': idLabel,
 	config,
@@ -193,6 +200,7 @@ async function provision({
 	mount,
 	'remote-env': addRemoteEnv,
 	'cache-from': addCacheFrom,
+	'cache-to': addCacheTo,
 	'buildkit': buildkit,
 	'additional-features': additionalFeaturesJson,
 	'skip-feature-auto-mapping': skipFeatureAutoMapping,
@@ -206,6 +214,8 @@ async function provision({
 	'experimental-lockfile': experimentalLockfile,
 	'experimental-frozen-lockfile': experimentalFrozenLockfile,
 	'omit-syntax-directive': omitSyntaxDirective,
+	'include-configuration': includeConfig,
+	'include-merged-configuration': includeMergedConfig,
 }: ProvisionArgs) {
 
 	const workspaceFolder = workspaceFolderArg ? path.resolve(process.cwd(), workspaceFolderArg) : undefined;
@@ -225,6 +235,7 @@ async function provision({
 		containerSystemDataFolder,
 		workspaceFolder,
 		workspaceMountConsistency,
+		gpuAvailability,
 		mountWorkspaceGitRoot,
 		configFile: config ? URI.file(path.resolve(process.cwd(), config)) : undefined,
 		overrideConfigFile: overrideConfig ? URI.file(path.resolve(process.cwd(), overrideConfig)) : undefined,
@@ -261,22 +272,27 @@ async function provision({
 		useBuildKit: buildkit,
 		buildxPlatform: undefined,
 		buildxPush: false,
+		additionalLabels: [],
 		buildxOutput: undefined,
-		buildxCacheTo: undefined,
+		buildxCacheTo: addCacheTo,
 		additionalFeatures,
 		skipFeatureAutoMapping,
 		skipPostAttach,
 		containerSessionDataFolder,
 		skipPersistingCustomizationsFromFeatures: false,
-		omitConfigRemotEnvFromMetadata: omitConfigRemotEnvFromMetadata,
+		omitConfigRemotEnvFromMetadata,
 		experimentalLockfile,
 		experimentalFrozenLockfile,
-		omitSyntaxDirective: omitSyntaxDirective,
+		omitSyntaxDirective,
+		includeConfig,
+		includeMergedConfig,
 	};
 
 	const result = await doProvision(options, providedIdLabels);
 	const exitCode = result.outcome === 'error' ? 1 : 0;
-	console.log(JSON.stringify(result));
+	await new Promise<void>((resolve, reject) => {
+		process.stdout.write(JSON.stringify(result) + '\n', err => err ? reject(err) : resolve());
+	});
 	if (result.outcome === 'success') {
 		await result.finishBackgroundTasks();
 	}
@@ -310,6 +326,9 @@ async function doProvision(options: ProvisionOptions, providedIdLabels: string[]
 			message: err.message,
 			description: err.description,
 			containerId: err.containerId,
+			disallowedFeatureId: err.data.disallowedFeatureId,
+			didStopContainer: err.data.didStopContainer,
+			learnMoreUrl: err.data.learnMoreUrl,
 			dispose,
 		};
 	}
@@ -335,6 +354,8 @@ function setUpOptions(y: Argv) {
 		'dotfiles-install-command': { type: 'string', description: 'The command to run after cloning the dotfiles repository. Defaults to run the first file of `install.sh`, `install`, `bootstrap.sh`, `bootstrap`, `setup.sh` and `setup` found in the dotfiles repository`s root folder.' },
 		'dotfiles-target-path': { type: 'string', default: '~/dotfiles', description: 'The path to clone the dotfiles repository to. Defaults to `~/dotfiles`.' },
 		'container-session-data-folder': { type: 'string', description: 'Folder to cache CLI data, for example userEnvProbe results' },
+		'include-configuration': { type: 'boolean', default: false, description: 'Include configuration in result.' },
+		'include-merged-configuration': { type: 'boolean', default: false, description: 'Include merged configuration in result.' },
 	})
 		.check(argv => {
 			const remoteEnvs = (argv['remote-env'] && (Array.isArray(argv['remote-env']) ? argv['remote-env'] : [argv['remote-env']])) as string[] | undefined;
@@ -348,13 +369,15 @@ function setUpOptions(y: Argv) {
 type SetUpArgs = UnpackArgv<ReturnType<typeof setUpOptions>>;
 
 function setUpHandler(args: SetUpArgs) {
-	(async () => setUp(args))().catch(console.error);
+	runAsyncHandler(setUp.bind(null, args));
 }
 
 async function setUp(args: SetUpArgs) {
 	const result = await doSetUp(args);
 	const exitCode = result.outcome === 'error' ? 1 : 0;
-	console.log(JSON.stringify(result));
+	await new Promise<void>((resolve, reject) => {
+		process.stdout.write(JSON.stringify(result) + '\n', err => err ? reject(err) : resolve());
+	});
 	await result.dispose();
 	process.exit(exitCode);
 }
@@ -378,6 +401,8 @@ async function doSetUp({
 	'dotfiles-install-command': dotfilesInstallCommand,
 	'dotfiles-target-path': dotfilesTargetPath,
 	'container-session-data-folder': containerSessionDataFolder,
+	'include-configuration': includeConfig,
+	'include-merged-configuration': includeMergedConfig,
 }: SetUpArgs) {
 
 	const disposables: (() => Promise<unknown> | undefined)[] = [];
@@ -416,6 +441,7 @@ async function doSetUp({
 			useBuildKit: 'auto',
 			buildxPlatform: undefined,
 			buildxPush: false,
+			additionalLabels: [],
 			buildxOutput: undefined,
 			buildxCacheTo: undefined,
 			skipFeatureAutoMapping: false,
@@ -446,15 +472,16 @@ async function doSetUp({
 			bailOut(common.output, 'Dev container not found.');
 		}
 
-		const config1 = addSubstitution(config0, config => beforeContainerSubstitute(undefined, config));
-		const config = addSubstitution(config1, config => containerSubstitute(cliHost.platform, config1.config.configFilePath, envListToObj(container.Config.Env), config));
+		const config = addSubstitution(config0, config => beforeContainerSubstitute(undefined, config));
 
 		const imageMetadata = getImageMetadataFromContainer(container, config, undefined, undefined, output).config;
 		const mergedConfig = mergeConfiguration(config.config, imageMetadata);
 		const containerProperties = await createContainerProperties(params, container.Id, configs?.workspaceConfig.workspaceFolder, mergedConfig.remoteUser);
-		await setupInContainer(common, containerProperties, mergedConfig, lifecycleCommandOriginMapFromMetadata(imageMetadata));
+		const res = await setupInContainer(common, containerProperties, config.config, mergedConfig, lifecycleCommandOriginMapFromMetadata(imageMetadata));
 		return {
 			outcome: 'success' as 'success',
+			configuration: includeConfig ? res.updatedConfig : undefined,
+			mergedConfiguration: includeMergedConfig ? res.updatedMergedConfig : undefined,
 			dispose,
 		};
 	} catch (originalError) {
@@ -491,6 +518,7 @@ function buildOptions(y: Argv) {
 		'buildkit': { choices: ['auto' as 'auto', 'never' as 'never'], default: 'auto' as 'auto', description: 'Control whether BuildKit should be used' },
 		'platform': { type: 'string', description: 'Set target platforms.' },
 		'push': { type: 'boolean', default: false, description: 'Push to a container registry.' },
+		'label': { type: 'string', description: 'Provide key and value configuration that adds metadata to an image' },
 		'output': { type: 'string', description: 'Overrides the default behavior to load built images into the local docker registry. Valid options are the same ones provided to the --output option of docker buildx build.' },
 		'additional-features': { type: 'string', description: 'Additional features to apply to the dev container (JSON as per "features" section in devcontainer.json)' },
 		'skip-feature-auto-mapping': { type: 'boolean', default: false, hidden: true, description: 'Temporary option for testing.' },
@@ -504,13 +532,15 @@ function buildOptions(y: Argv) {
 type BuildArgs = UnpackArgv<ReturnType<typeof buildOptions>>;
 
 function buildHandler(args: BuildArgs) {
-	(async () => build(args))().catch(console.error);
+	runAsyncHandler(build.bind(null, args));
 }
 
 async function build(args: BuildArgs) {
 	const result = await doBuild(args);
 	const exitCode = result.outcome === 'error' ? 1 : 0;
-	console.log(JSON.stringify(result));
+	await new Promise<void>((resolve, reject) => {
+		process.stdout.write(JSON.stringify(result) + '\n', err => err ? reject(err) : resolve());
+	});
 	await result.dispose();
 	process.exit(exitCode);
 }
@@ -529,6 +559,7 @@ async function doBuild({
 	'buildkit': buildkit,
 	'platform': buildxPlatform,
 	'push': buildxPush,
+	'label': buildxLabel,
 	'output': buildxOutput,
 	'cache-to': buildxCacheTo,
 	'additional-features': additionalFeaturesJson,
@@ -576,6 +607,7 @@ async function doBuild({
 			useBuildKit: buildkit,
 			buildxPlatform,
 			buildxPush,
+			additionalLabels: [],
 			buildxOutput,
 			buildxCacheTo,
 			skipFeatureAutoMapping,
@@ -611,6 +643,9 @@ async function doBuild({
 
 		// Support multiple use of `--image-name`
 		const imageNames = (argImageName && (Array.isArray(argImageName) ? argImageName : [argImageName]) as string[]) || undefined;
+
+		// Support multiple use of `--label`
+		params.additionalLabels = (buildxLabel && (Array.isArray(buildxLabel) ? buildxLabel : [buildxLabel]) as string[]) || [];
 
 		if (isDockerFileConfig(config)) {
 
@@ -759,12 +794,14 @@ function runUserCommandsOptions(y: Argv) {
 type RunUserCommandsArgs = UnpackArgv<ReturnType<typeof runUserCommandsOptions>>;
 
 function runUserCommandsHandler(args: RunUserCommandsArgs) {
-	(async () => runUserCommands(args))().catch(console.error);
+	runAsyncHandler(runUserCommands.bind(null, args));
 }
 async function runUserCommands(args: RunUserCommandsArgs) {
 	const result = await doRunUserCommands(args);
 	const exitCode = result.outcome === 'error' ? 1 : 0;
-	console.log(JSON.stringify(result));
+	await new Promise<void>((resolve, reject) => {
+		process.stdout.write(JSON.stringify(result) + '\n', err => err ? reject(err) : resolve());
+	});
 	await result.dispose();
 	process.exit(exitCode);
 }
@@ -841,6 +878,7 @@ async function doRunUserCommands({
 			useBuildKit: 'auto',
 			buildxPlatform: undefined,
 			buildxPush: false,
+			additionalLabels: [],
 			buildxOutput: undefined,
 			buildxCacheTo: undefined,
 			skipFeatureAutoMapping,
@@ -946,7 +984,7 @@ function readConfigurationOptions(y: Argv) {
 type ReadConfigurationArgs = UnpackArgv<ReturnType<typeof readConfigurationOptions>>;
 
 function readConfigurationHandler(args: ReadConfigurationArgs) {
-	(async () => readConfiguration(args))().catch(console.error);
+	runAsyncHandler(readConfiguration.bind(null, args));
 }
 
 async function readConfiguration({
@@ -1082,7 +1120,7 @@ function outdatedOptions(y: Argv) {
 type OutdatedArgs = UnpackArgv<ReturnType<typeof outdatedOptions>>;
 
 function outdatedHandler(args: OutdatedArgs) {
-	(async () => outdated(args))().catch(console.error);
+	runAsyncHandler(outdated.bind(null, args));
 }
 
 async function outdated({
@@ -1214,7 +1252,7 @@ function execOptions(y: Argv) {
 export type ExecArgs = UnpackArgv<ReturnType<typeof execOptions>>;
 
 function execHandler(args: ExecArgs) {
-	(async () => exec(args))().catch(console.error);
+	runAsyncHandler(exec.bind(null, args));
 }
 
 async function exec(args: ExecArgs) {
@@ -1289,6 +1327,7 @@ export async function doExec({
 			omitLoggerHeader: true,
 			buildxPlatform: undefined,
 			buildxPush: false,
+			additionalLabels: [],
 			buildxCacheTo: undefined,
 			skipFeatureAutoMapping,
 			buildxOutput: undefined,

@@ -111,9 +111,9 @@ export async function extendImage(params: DockerResolverParameters, config: Subs
 	cliHost.mkdirp(emptyTempDir);
 	args.push(
 		'--target', featureBuildInfo.overrideTarget,
-		'-t', updatedImageName,
-		...additionalImageNames.map(name => ['-t', name]).flat(),
 		'-f', dockerfilePath,
+		...additionalImageNames.length > 0 ? additionalImageNames.map(name => ['-t', name]).flat() : ['-t', updatedImageName],
+		...params.additionalLabels.length > 0 ? params.additionalLabels.map(label => ['--label', label]).flat() : [],
 		emptyTempDir
 	);
 
@@ -125,7 +125,7 @@ export async function extendImage(params: DockerResolverParameters, config: Subs
 		await dockerCLI(infoParams, ...args);
 	}
 	return {
-		updatedImageName: [ updatedImageName ],
+		updatedImageName: additionalImageNames.length > 0 ? additionalImageNames : [updatedImageName],
 		imageMetadata: getDevcontainerMetadata(imageBuildInfo.metadata, config, featuresConfig),
 		imageDetails: async () => imageBuildInfo.imageDetails,
 	};

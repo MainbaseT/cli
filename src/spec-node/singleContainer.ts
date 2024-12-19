@@ -7,7 +7,7 @@
 import { createContainerProperties, startEventSeen, ResolverResult, getTunnelInformation, getDockerfilePath, getDockerContextPath, DockerResolverParameters, isDockerFileConfig, uriToWSLFsPath, WorkspaceConfiguration, getFolderImageName, inspectDockerImage, logUMask, SubstitutedConfig, checkDockerSupportForGPU, isBuildKitImagePolicyError } from './utils';
 import { ContainerProperties, setupInContainer, ResolverProgress, ResolverParameters } from '../spec-common/injectHeadless';
 import { ContainerError, toErrorText } from '../spec-common/errors';
-import { ContainerDetails, listContainers, DockerCLIParameters, inspectContainers, dockerCLI, dockerPtyCLI, toPtyExecParameters, ImageDetails, toExecParameters } from '../spec-shutdown/dockerUtils';
+import { ContainerDetails, listContainers, DockerCLIParameters, inspectContainers, dockerCLI, dockerPtyCLI, toPtyExecParameters, ImageDetails, toExecParameters, removeContainer } from '../spec-shutdown/dockerUtils';
 import { DevContainerConfig, DevContainerFromDockerfileConfig, DevContainerFromImageConfig } from '../spec-configuration/configuration';
 import { LogLevel, Log, makeLog } from '../spec-utils/log';
 import { extendImage, getExtendImageBuildInfo, updateRemoteUserUID } from './containerFeatures';
@@ -100,12 +100,15 @@ async function setupContainer(container: ContainerDetails, params: DockerResolve
 	const { common } = params;
 	const {
 		remoteEnv: extensionHostEnv,
-	} = await setupInContainer(common, containerProperties, mergedConfig, lifecycleCommandOriginMapFromMetadata(imageMetadata));
+		updatedConfig,
+		updatedMergedConfig,
+	} = await setupInContainer(common, containerProperties, config, mergedConfig, lifecycleCommandOriginMapFromMetadata(imageMetadata));
 
 	return {
 		params: common,
 		properties: containerProperties,
-		config,
+		config: updatedConfig,
+		mergedConfig: updatedMergedConfig,
 		resolvedAuthority: {
 			extensionHostEnv,
 		},
@@ -296,7 +299,7 @@ export async function findExistingContainer(params: DockerResolverParameters, la
 	if (container && (params.removeOnStartup === true || params.removeOnStartup === container.Id)) {
 		const text = 'Removing Existing Container';
 		const start = common.output.start(text);
-		await dockerCLI(params, 'rm', '-f', container.Id);
+		await removeContainer(params, container.Id);
 		common.output.stop(text, start);
 		container = undefined;
 	}
@@ -326,7 +329,7 @@ export async function findDevContainer(params: DockerCLIParameters | DockerResol
 	return details.filter(container => container.State.Status !== 'removing')[0];
 }
 
-export async function extraRunArgs(common: ResolverParameters, params: DockerCLIParameters | DockerResolverParameters, config: DevContainerFromDockerfileConfig | DevContainerFromImageConfig) {
+export async function extraRunArgs(common: ResolverParameters, params: DockerResolverParameters, config: DevContainerFromDockerfileConfig | DevContainerFromImageConfig) {
 	const extraArguments: string[] = [];
 	if (config.hostRequirements?.gpu) {
 		if (await checkDockerSupportForGPU(params)) {

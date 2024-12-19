@@ -11,7 +11,7 @@ import { ContainerProperties, setupInContainer, ResolverProgress } from '../spec
 import { ContainerError } from '../spec-common/errors';
 import { Workspace } from '../spec-utils/workspaces';
 import { equalPaths, parseVersion, isEarlierVersion, CLIHost } from '../spec-common/commonUtils';
-import { ContainerDetails, inspectContainer, listContainers, DockerCLIParameters, dockerCLI, dockerComposeCLI, dockerComposePtyCLI, PartialExecParameters, DockerComposeCLI, ImageDetails, toExecParameters, toPtyExecParameters } from '../spec-shutdown/dockerUtils';
+import { ContainerDetails, inspectContainer, listContainers, DockerCLIParameters, dockerComposeCLI, dockerComposePtyCLI, PartialExecParameters, DockerComposeCLI, ImageDetails, toExecParameters, toPtyExecParameters, removeContainer } from '../spec-shutdown/dockerUtils';
 import { DevContainerFromDockerComposeConfig, getDockerComposeFilePaths } from '../spec-configuration/configuration';
 import { Log, LogLevel, makeLog, terminalEscapeSequences } from '../spec-utils/log';
 import { getExtendImageBuildInfo, updateRemoteUserUID } from './containerFeatures';
@@ -54,7 +54,7 @@ async function _openDockerComposeDevContainer(params: DockerResolverParameters, 
 		if (container && (params.removeOnStartup === true || params.removeOnStartup === container.Id)) {
 			const text = 'Removing existing container.';
 			const start = common.output.start(text);
-			await dockerCLI(params, 'rm', '-f', container.Id);
+			await removeContainer(params, container.Id);
 			common.output.stop(text, start);
 			container = undefined;
 		}
@@ -76,12 +76,15 @@ async function _openDockerComposeDevContainer(params: DockerResolverParameters, 
 
 		const {
 			remoteEnv: extensionHostEnv,
-		} = await setupInContainer(common, containerProperties, mergedConfig, lifecycleCommandOriginMapFromMetadata(imageMetadata));
+			updatedConfig,
+			updatedMergedConfig,
+		} = await setupInContainer(common, containerProperties, config, mergedConfig, lifecycleCommandOriginMapFromMetadata(imageMetadata));
 
 		return {
 			params: common,
 			properties: containerProperties,
-			config,
+			config: updatedConfig,
+			mergedConfig: updatedMergedConfig,
 			resolvedAuthority: {
 				extensionHostEnv,
 			},
@@ -554,7 +557,7 @@ while sleep 1 & wait $$!; do :; done", "-"${userEntrypoint.map(a => `, ${JSON.st
     init: true` : ''}${user ? `
     user: ${user}` : ''}${Object.keys(env).length ? `
     environment:${Object.keys(env).map(key => `
-      - ${key}=${env[key]}`).join('')}` : ''}${mergedConfig.privileged ? `
+      - '${key}=${env[key].replace(/\n/g, '\\n').replace(/\$/g, '$$$$').replace(/'/g, '\'\'')}'`).join('')}` : ''}${mergedConfig.privileged ? `
     privileged: true` : ''}${capAdd.length ? `
     cap_add:${capAdd.map(cap => `
       - ${cap}`).join('')}` : ''}${securityOpts.length ? `
@@ -654,7 +657,21 @@ export async function getProjectName(params: DockerCLIParameters | DockerResolve
 		}
 	}
 	if (composeConfig?.name) {
-		return toProjectName(composeConfig.name, newProjectName);
+		if (composeConfig.name !== 'devcontainer') {
+			return toProjectName(composeConfig.name, newProjectName);
+		}
+		// Check if 'devcontainer' is from a compose file or just the default.
+		for (let i = composeFiles.length - 1; i >= 0; i--) {
+			try {
+				const fragment = yaml.load((await cliHost.readFile(composeFiles[i])).toString()) || {} as any;
+				if (fragment.name) {
+					// Use composeConfig.name ('devcontainer') because fragment.name could include environment variables.
+					return toProjectName(composeConfig.name, newProjectName);
+				}
+			} catch (error) {
+				// Ignore when parsing fails due to custom yaml tags (e.g., !reset)
+			}
+		}
 	}
 	const configDir = workspace.configFolderPath;
 	const workingDir = composeFiles[0] ? cliHost.path.dirname(composeFiles[0]) : cliHost.cwd; // From https://github.com/docker/compose/blob/79557e3d3ab67c3697641d9af91866d7e400cfeb/compose/config/config.py#L290
@@ -688,22 +705,19 @@ export function dockerComposeCLIConfig(params: Omit<PartialExecParameters, 'cmd'
 	let result: Promise<DockerComposeCLI>;
 	return () => {
 		return result || (result = (async () => {
-			let v2 = false;
+			let v2 = true;
 			let stdout: Buffer;
 			try {
 				stdout = (await dockerComposeCLI({
 					...params,
-					cmd: dockerComposeCLICmd,
-				}, 'version', '--short')).stdout;
-			} catch (err) {
-				if (err?.code !== 'ENOENT') {
-					throw err;
-				}
-				stdout = (await dockerComposeCLI({
-					...params,
 					cmd: dockerCLICmd,
 				}, 'compose', 'version', '--short')).stdout;
-				v2 = true;
+			} catch (err) {
+				stdout = (await dockerComposeCLI({
+					...params,
+					cmd: dockerComposeCLICmd,
+				}, 'version', '--short')).stdout;
+				v2 = false;
 			}
 			const version = stdout.toString().trim();
 			params.output.write(`Docker Compose version: ${version}`);

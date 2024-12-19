@@ -2,7 +2,68 @@
 
 Notable changes.
 
+## November 2024
+
+### [0.72.0]
+- Fix: change increment syntax in test library script (https://github.com/devcontainers/cli/pull/896)
+- Increase timeout to 6 seconds (7 attempts) (https://github.com/microsoft/vscode-remote-release/issues/6509)
+- Remove unnecessary log (https://github.com/devcontainers/cli/pull/925)
+
+## September 2024
+
+### [0.71.0]
+- Exit with non-zero code on unexpected errors (https://github.com/microsoft/vscode-remote-release/issues/10217)
+- Add option for GPU availability (https://github.com/microsoft/vscode-remote-release/issues/9385)
+
+### [0.70.0]
+- Add more leniency towards registries that malform WWW-Authenticate (https://github.com/devcontainers/cli/pull/884)
+- Handle concurrent removal (https://github.com/microsoft/vscode-remote-release/issues/6509)
+
+## August 2024
+
+### [0.69.0]
+- Enhance Template metadata (https://github.com/devcontainers/cli/pull/875)
+    - Caches additional Template metadata (such as `files`) onto the manifest
+	- Resolves full file paths for `optionalPaths` directories that only contain one file (for better usability in upstream tools)
+	- Fixes bugs
+
+### [0.68.0]
+- Supporting changes for [Template `optionalPaths` specification](https://github.com/devcontainers/spec/blob/main/docs/specs/devcontainer-templates.md#the-optionalpaths-property) (https://github.com/microsoft/vscode-remote-release/issues/10095)
+	- Publish metadata on Template OCI manifests (https://github.com/devcontainers/cli/pull/865)
+	- Add `--omit-paths` option to `templates apply` command (https://github.com/devcontainers/cli/pull/868)
+	- Add `templates metadata` command (https://github.com/devcontainers/cli/pull/866)
+
+### [0.67.0]
+- Fix containerEnv substitution. (https://github.com/microsoft/vscode-remote-release/issues/10033)
+
+## July 2024
+
+### [0.66.0]
+- Wait for result to be written to stdout. (https://github.com/microsoft/vscode-remote-release/issues/10029)
+
+## June 2024
+
+### [0.65.0]
+- Fix confusing error message with local feature. (https://github.com/devcontainers/cli/issues/834)
+- Add `--label` parameter to `devcontainer build` command. (https://github.com/devcontainers/cli/issues/837)
+- Prefer Docker Compose v2 over v1. (https://github.com/devcontainers/cli/issues/826)
+
+### [0.64.0]
+- Fix project name with env variable. (https://github.com/devcontainers/cli/issues/839)
+
+### [0.63.0]
+- Surface additional information in `devcontainer up`. (https://github.com/devcontainers/cli/pull/836)
+- Changes the config layer of the Feature manifest to a empty descriptor (https://github.com/devcontainers/cli/pull/815)
+
 ## May 2024
+
+### [0.62.0]
+- Fix support for project name attribute. (https://github.com/devcontainers/cli/issues/831)
+
+### [0.61.0]
+- Use --depth 1 to make dotfiles install process faster (https://github.com/devcontainers/cli/pull/830)
+- Enable --cache-to and --cache-from in devcontainer up (https://github.com/devcontainers/cli/pull/813)
+- Omit generated image name when `--image-name` is given (https://github.com/devcontainers/cli/pull/812)
 
 ### [0.60.0]
 - Support project name attribute. (https://github.com/microsoft/vscode-remote-release/issues/512)

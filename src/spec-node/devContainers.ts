@@ -8,7 +8,7 @@ import * as crypto from 'crypto';
 import * as os from 'os';
 
 import { mapNodeOSToGOOS, mapNodeArchitectureToGOARCH } from '../spec-configuration/containerCollectionsOCI';
-import { DockerResolverParameters, DevContainerAuthority, UpdateRemoteUserUIDDefault, BindMountConsistency, getCacheFolder } from './utils';
+import { DockerResolverParameters, DevContainerAuthority, UpdateRemoteUserUIDDefault, BindMountConsistency, getCacheFolder, GPUAvailability } from './utils';
 import { createNullLifecycleHook, finishBackgroundTasks, ResolverParameters, UserEnvProbe } from '../spec-common/injectHeadless';
 import { GoARCH, GoOS, getCLIHost, loadNativeModule } from '../spec-common/commonUtils';
 import { resolve } from './configContainer';
@@ -28,6 +28,7 @@ export interface ProvisionOptions {
 	containerSystemDataFolder: string | undefined;
 	workspaceFolder: string | undefined;
 	workspaceMountConsistency?: BindMountConsistency;
+	gpuAvailability?: GPUAvailability;
 	mountWorkspaceGitRoot: boolean;
 	configFile: URI | undefined;
 	overrideConfigFile: URI | undefined;
@@ -52,6 +53,7 @@ export interface ProvisionOptions {
 	omitLoggerHeader?: boolean | undefined;
 	buildxPlatform: string | undefined;
 	buildxPush: boolean;
+	additionalLabels: string[];
 	buildxOutput: string | undefined;
 	buildxCacheTo: string | undefined;
 	additionalFeatures?: Record<string, string | boolean | Record<string, string | boolean>>;
@@ -69,6 +71,8 @@ export interface ProvisionOptions {
 	experimentalFrozenLockfile?: boolean;
 	secretsP?: Promise<Record<string, string>>;
 	omitSyntaxDirective?: boolean;
+	includeConfig?: boolean;
+	includeMergedConfig?: boolean;
 }
 
 export async function launch(options: ProvisionOptions, providedIdLabels: string[] | undefined, disposables: (() => Promise<unknown> | undefined)[]) {
@@ -81,10 +85,12 @@ export async function launch(options: ProvisionOptions, providedIdLabels: string
 	output.stop(text, start);
 	const { dockerContainerId, composeProjectName } = result;
 	return {
-		containerId: dockerContainerId!,
+		containerId: dockerContainerId,
 		composeProjectName,
 		remoteUser: result.properties.user,
 		remoteWorkspaceFolder: result.properties.remoteWorkspaceFolder,
+		configuration: options.includeConfig ? result.config : undefined,
+		mergedConfiguration: options.includeMergedConfig ? result.mergedConfig : undefined,
 		finishBackgroundTasks: async () => {
 			try {
 				await finishBackgroundTasks(result.params.backgroundTasks);
@@ -96,7 +102,7 @@ export async function launch(options: ProvisionOptions, providedIdLabels: string
 }
 
 export async function createDockerParams(options: ProvisionOptions, disposables: (() => Promise<unknown> | undefined)[]): Promise<DockerResolverParameters> {
-	const { persistedFolder, additionalMounts, updateRemoteUserUIDDefault, containerDataFolder, containerSystemDataFolder, workspaceMountConsistency, mountWorkspaceGitRoot, remoteEnv, experimentalLockfile, experimentalFrozenLockfile, omitLoggerHeader, secretsP } = options;
+	const { persistedFolder, additionalMounts, updateRemoteUserUIDDefault, containerDataFolder, containerSystemDataFolder, workspaceMountConsistency, gpuAvailability, mountWorkspaceGitRoot, remoteEnv, experimentalLockfile, experimentalFrozenLockfile, omitLoggerHeader, secretsP } = options;
 	let parsedAuthority: DevContainerAuthority | undefined;
 	if (options.workspaceFolder) {
 		parsedAuthority = { hostPath: options.workspaceFolder } as DevContainerAuthority;
@@ -207,6 +213,7 @@ export async function createDockerParams(options: ProvisionOptions, disposables:
 		dockerComposeCLI: dockerComposeCLI,
 		dockerEnv: cliHost.env,
 		workspaceMountConsistencyDefault: workspaceMountConsistency,
+		gpuAvailability: gpuAvailability || 'detect',
 		mountWorkspaceGitRoot,
 		updateRemoteUserUIDOnMacOS: false,
 		cacheMount: 'bind',
@@ -223,6 +230,7 @@ export async function createDockerParams(options: ProvisionOptions, disposables:
 		experimentalFrozenLockfile,
 		buildxPlatform: common.buildxPlatform,
 		buildxPush: common.buildxPush,
+		additionalLabels: options.additionalLabels,
 		buildxOutput: common.buildxOutput,
 		buildxCacheTo: common.buildxCacheTo,
 		platformInfo

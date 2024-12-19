@@ -27,6 +27,38 @@ describe('Dev Containers CLI', function () {
 
 	describe('Command build', () => {
 
+		it('should build successfully with valid image metadata --label property', async () => {
+			const testFolder = `${__dirname}/configs/example`;
+			const response = await shellExec(`${cli} build --workspace-folder ${testFolder} --label 'name=label-test' --label 'type=multiple-labels'`);
+			const res = JSON.parse(response.stdout);
+			assert.equal(res.outcome, 'success');
+			const labels = await shellExec(`docker inspect --format '{{json .Config.Labels}}' ${res.imageName} | jq`);
+			assert.match(labels.stdout.toString(), /\"name\": \"label-test\"/);
+		});
+
+		it('should fail to build with correct error message for local feature', async () => {
+			const testFolder = `${__dirname}/configs/image-with-local-feature`;
+			try {
+				await shellExec(`${cli} build --workspace-folder ${testFolder} --image-name demo:v1`);
+			} catch (error) {
+				const res = JSON.parse(error.stdout);
+				assert.equal(res.outcome, 'error');
+				assert.match(res.message, /prepend your Feature name with/);
+			}
+		});
+
+		it('should correctly configure the image name to push from --image-name with --push true', async () => {
+			const testFolder = `${__dirname}/configs/example`;
+			try {
+				await shellExec(`${cli} build --workspace-folder ${testFolder} --image-name demo:v1`);
+				const tags = await shellExec(`docker images --format "{{.Tag}}" demo`);
+				const imageTags = tags.stdout.trim().split('\n').filter(tag => tag !== '<none>');
+				assert.equal(imageTags.length, 1, 'There should be only one tag for demo:v1'); 
+			} catch (error) {
+				assert.equal(error.code, 'ERR_ASSERTION', 'Should fail with ERR_ASSERTION');
+			}
+		});
+
 		buildKitOptions.forEach(({ text, options }) => {
 			it(`should execute successfully with valid image config  [${text}]`, async () => {
 				const testFolder = `${__dirname}/configs/image`;

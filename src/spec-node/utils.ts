@@ -11,11 +11,11 @@ import { ContainerError, toErrorText } from '../spec-common/errors';
 import { CLIHost, runCommandNoPty, runCommand, getLocalUsername, PlatformInfo } from '../spec-common/commonUtils';
 import { Log, LogLevel, makeLog, nullLog } from '../spec-utils/log';
 
-import { ContainerProperties, getContainerProperties, LifecycleCommand, ResolverParameters } from '../spec-common/injectHeadless';
+import { CommonDevContainerConfig, ContainerProperties, getContainerProperties, LifecycleCommand, ResolverParameters } from '../spec-common/injectHeadless';
 import { Workspace } from '../spec-utils/workspaces';
 import { URI } from 'vscode-uri';
 import { ShellServer } from '../spec-common/shellServer';
-import { inspectContainer, inspectImage, getEvents, ContainerDetails, DockerCLIParameters, dockerExecFunction, dockerPtyCLI, dockerPtyExecFunction, toDockerImageName, DockerComposeCLI, ImageDetails, dockerCLI } from '../spec-shutdown/dockerUtils';
+import { inspectContainer, inspectImage, getEvents, ContainerDetails, DockerCLIParameters, dockerExecFunction, dockerPtyCLI, dockerPtyExecFunction, toDockerImageName, DockerComposeCLI, ImageDetails, dockerCLI, removeContainer } from '../spec-shutdown/dockerUtils';
 import { getRemoteWorkspaceFolder } from './dockerCompose';
 import { findGitRootFolder } from '../spec-common/git';
 import { parentURI, uriToFsPath } from '../spec-configuration/configurationCommonUtils';
@@ -24,7 +24,7 @@ import { StringDecoder } from 'string_decoder';
 import { Event } from '../spec-utils/event';
 import { Mount } from '../spec-configuration/containerFeaturesConfiguration';
 import { PackageConfiguration } from '../spec-utils/product';
-import { ImageMetadataEntry } from './imageMetadata';
+import { ImageMetadataEntry, MergedDevContainerConfig } from './imageMetadata';
 import { getImageIndexEntryForPlatform, getManifest, getRef } from '../spec-configuration/containerCollectionsOCI';
 import { requestEnsureAuthenticated } from '../spec-configuration/httpOCIRegistry';
 import { configFileLabel, findDevContainer, hostFolderLabel } from './singleContainer';
@@ -34,6 +34,8 @@ export { uriToFsPath, parentURI } from '../spec-configuration/configurationCommo
 
 
 export type BindMountConsistency = 'consistent' | 'cached' | 'delegated' | undefined;
+
+export type GPUAvailability = 'all' | 'detect' | 'none';
 
 // Generic retry function
 export async function retry<T>(fn: () => Promise<T>, options: { retryIntervalMilliseconds: number; maxRetries: number; output: Log }): Promise<T> {
@@ -100,6 +102,7 @@ export interface DockerResolverParameters {
 	dockerComposeCLI: () => Promise<DockerComposeCLI>;
 	dockerEnv: NodeJS.ProcessEnv;
 	workspaceMountConsistencyDefault: BindMountConsistency;
+	gpuAvailability: GPUAvailability;
 	mountWorkspaceGitRoot: boolean;
 	updateRemoteUserUIDOnMacOS: boolean;
 	cacheMount: 'volume' | 'bind' | 'none';
@@ -116,6 +119,7 @@ export interface DockerResolverParameters {
 	experimentalFrozenLockfile?: boolean;
 	buildxPlatform: string | undefined;
 	buildxPush: boolean;
+	additionalLabels: string[];
 	buildxOutput: string | undefined;
 	buildxCacheTo: string | undefined;
 	platformInfo: PlatformInfo;
@@ -124,12 +128,13 @@ export interface DockerResolverParameters {
 export interface ResolverResult {
 	params: ResolverParameters;
 	properties: ContainerProperties;
-	config: DevContainerConfig | undefined;
+	config: CommonDevContainerConfig;
+	mergedConfig: MergedDevContainerConfig;
 	resolvedAuthority: { extensionHostEnv?: { [key: string]: string | null } };
 	tunnelInformation: { environmentTunnels?: { remoteAddress: { port: number; host: string }; localAddress: string }[] };
 	isTrusted?: boolean;
-	dockerParams: DockerResolverParameters | undefined;
-	dockerContainerId: string | undefined;
+	dockerParams: DockerResolverParameters;
+	dockerContainerId: string;
 	composeProjectName?: string;
 }
 
@@ -200,7 +205,13 @@ async function hasLabels(params: DockerResolverParameters, info: any, expectedLa
 		.every(name => actualLabels[name] === expectedLabels[name]);
 }
 
-export async function checkDockerSupportForGPU(params: DockerCLIParameters | DockerResolverParameters): Promise<Boolean> {
+export async function checkDockerSupportForGPU(params: DockerResolverParameters): Promise<Boolean> {
+	if (params.gpuAvailability === 'all') {
+		return true;
+	}
+	if (params.gpuAvailability === 'none') {
+		return false;
+	}
 	const result = await dockerCLI(params, 'info', '-f', '{{.Runtimes.nvidia}}');
 	const runtimeFound = result.stdout.includes('nvidia-container-runtime');
 	return runtimeFound;
@@ -562,7 +573,7 @@ export async function findContainerAndIdLabels(params: DockerResolverParameters 
 					container = undefined;
 				} else if (removeContainerWithOldLabels === true || removeContainerWithOldLabels === container.Id) {
 					// Remove container, so it will be rebuilt with new labels.
-					await dockerCLI(params, 'rm', '-f', container.Id);
+					await removeContainer(params, container.Id);
 					container = undefined;
 				}
 			}
@@ -576,4 +587,15 @@ export async function findContainerAndIdLabels(params: DockerResolverParameters 
 			[`${hostFolderLabel}=${workspaceFolder}`, `${configFileLabel}=${configFile}`] :
 			[`${hostFolderLabel}=${workspaceFolder}`],
 	};
+}
+
+export function runAsyncHandler(handler: () => Promise<void>) {
+	(async () => {
+		try {
+			await handler();
+		} catch (err) {
+			console.error(err);
+			process.exit(1);
+		}
+	})();
 }
